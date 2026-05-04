@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 OPEN_INTEREST_PATH = "/fapi/v1/openInterest"
 PREMIUM_INDEX_PATH = "/fapi/v1/premiumIndex"
-REQUEST_GAP_SEC = 0.1
 HTTP_TIMEOUT_SEC = 10
 
 
@@ -31,12 +30,15 @@ class OIPoller:
         rest_base: str,
         engine: SignalEngine,
         poll_interval_sec: int,
+        concurrency: int = 20,
     ) -> None:
         self._session = session
         self._rest_base = rest_base.rstrip("/")
         self._engine = engine
         self._poll_interval = poll_interval_sec
         self._mode: str = "openInterest"  # 或 "premiumIndex"
+        self._sem = asyncio.Semaphore(max(1, concurrency))
+        self._concurrency = max(1, concurrency)
 
     async def detect_endpoint(self, probe_symbol: str) -> None:
         """启动时探测一次，确定走哪个端点。"""
@@ -78,56 +80,60 @@ class OIPoller:
 
         raise OIEndpointError("Aster 上没有可用的 OI 数据源，请检查 API 文档")
 
-    async def _fetch_one(self, symbol: str) -> float | None:
+    async def _fetch_one(self, symbol: str) -> bool:
+        """请求 + 落库到 engine。返回是否拿到有效值。"""
         if self._mode == "openInterest":
             url = f"{self._rest_base}{OPEN_INTEREST_PATH}?symbol={symbol}"
         else:
             url = f"{self._rest_base}{PREMIUM_INDEX_PATH}?symbol={symbol}"
 
-        try:
-            async with self._session.get(
-                url,
-                timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SEC),
-            ) as resp:
-                if resp.status != 200:
-                    if resp.status in (418, 429):
-                        logger.warning("OI %s 限速 status=%s，本轮跳过", symbol, resp.status)
-                    else:
-                        body = await resp.text()
-                        logger.debug("OI %s status=%s body=%s", symbol, resp.status, body[:200])
-                    return None
-                data = await resp.json()
-        except asyncio.TimeoutError:
-            logger.debug("OI %s 超时", symbol)
-            return None
-        except Exception as exc:
-            logger.debug("OI %s 异常 %s", symbol, exc)
-            return None
+        async with self._sem:
+            try:
+                async with self._session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SEC),
+                ) as resp:
+                    if resp.status != 200:
+                        if resp.status in (418, 429):
+                            logger.warning("OI %s 限速 status=%s，本轮跳过", symbol, resp.status)
+                        else:
+                            body = await resp.text()
+                            logger.debug("OI %s status=%s body=%s", symbol, resp.status, body[:200])
+                        return False
+                    data = await resp.json()
+            except asyncio.TimeoutError:
+                logger.debug("OI %s 超时", symbol)
+                return False
+            except Exception as exc:
+                logger.debug("OI %s 异常 %s", symbol, exc)
+                return False
 
         raw = data.get("openInterest")
         if raw is None:
-            return None
+            return False
         try:
-            return float(raw)
+            oi = float(raw)
         except (TypeError, ValueError):
-            return None
+            return False
+
+        self._engine.on_oi_sample(symbol, oi, time.time())
+        return True
 
     async def run(self) -> None:
         logger.info(
-            "OI poller 启动 mode=%s interval=%ds",
+            "OI poller 启动 mode=%s interval=%ds 并发=%d",
             self._mode,
             self._poll_interval,
+            self._concurrency,
         )
         while True:
             symbols = self._engine.all_symbols()
             cycle_start = time.monotonic()
-            count_ok = 0
-            for sym in symbols:
-                oi = await self._fetch_one(sym)
-                if oi is not None:
-                    self._engine.on_oi_sample(sym, oi, time.time())
-                    count_ok += 1
-                await asyncio.sleep(REQUEST_GAP_SEC)
+            results = await asyncio.gather(
+                *(self._fetch_one(s) for s in symbols),
+                return_exceptions=True,
+            )
+            count_ok = sum(1 for r in results if r is True)
             elapsed = time.monotonic() - cycle_start
             logger.info(
                 "OI 轮询完成 ok=%d/%d 耗时=%.1fs",

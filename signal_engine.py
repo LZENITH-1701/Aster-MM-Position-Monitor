@@ -15,6 +15,20 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class SymbolStats:
+    symbol: str
+    trade_count: int
+    near_count: int
+    hit_ratio: float
+    oi_change_ratio: float
+    oi_start: float
+    oi_end: float
+    has_oi: bool
+    bid: float
+    ask: float
+
+
+@dataclass
 class TickerState:
     symbol: str
     best_bid: float = 0.0
@@ -49,6 +63,44 @@ class SignalEngine:
 
     def all_symbols(self) -> list[str]:
         return list(self._states.keys())
+
+    def snapshot(self, now_ts: float | None = None) -> list[SymbolStats]:
+        """只读快照：返回每个 symbol 在当前窗口内的统计。"""
+        if now_ts is None:
+            now_ts = time.time()
+        cutoff = now_ts - self._cfg.signal_window_sec
+        out: list[SymbolStats] = []
+        for st in self._states.values():
+            valid_hits = [hit for ts, hit in st.trade_hits if ts >= cutoff]
+            n = len(valid_hits)
+            near = sum(1 for h in valid_hits if h)
+            hit_ratio = (near / n) if n > 0 else 0.0
+
+            valid_oi = [(ts, v) for ts, v in st.oi_history if ts >= cutoff]
+            has_oi = len(valid_oi) >= 2 and valid_oi[0][1] > 0
+            if has_oi:
+                oi_start = valid_oi[0][1]
+                oi_end = valid_oi[-1][1]
+                oi_chg = (oi_end - oi_start) / oi_start
+            else:
+                oi_start = oi_end = 0.0
+                oi_chg = 0.0
+
+            out.append(
+                SymbolStats(
+                    symbol=st.symbol,
+                    trade_count=n,
+                    near_count=near,
+                    hit_ratio=hit_ratio,
+                    oi_change_ratio=oi_chg,
+                    oi_start=oi_start,
+                    oi_end=oi_end,
+                    has_oi=has_oi,
+                    bid=st.best_bid,
+                    ask=st.best_ask,
+                )
+            )
+        return out
 
     # ---------- 输入：行情 ----------
 

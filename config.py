@@ -43,8 +43,10 @@ class Config:
     oi_poll_interval_sec: int
     min_trades_in_window: int
     alert_cooldown_sec: int
-    symbol_refresh_interval_sec: int
+    symbol_refresh_interval_sec: int   # 0 = 启动时锁定 symbol 列表，不再刷新
     ws_batch_size: int
+    stats_interval_sec: int            # 0 = 关闭定期状态日志
+    oi_concurrency: int                # OI 轮询的最大并发数
 
     telegram_bot_token: str
     telegram_chat_id: str
@@ -68,8 +70,10 @@ def load_config() -> Config:
         oi_poll_interval_sec=_get_int("OI_POLL_INTERVAL_SEC", 30),
         min_trades_in_window=_get_int("MIN_TRADES_IN_WINDOW", 30),
         alert_cooldown_sec=_get_int("ALERT_COOLDOWN_SEC", 600),
-        symbol_refresh_interval_sec=_get_int("SYMBOL_REFRESH_INTERVAL_SEC", 3600),
+        symbol_refresh_interval_sec=_get_int("SYMBOL_REFRESH_INTERVAL_SEC", 0),
         ws_batch_size=_get_int("WS_BATCH_SIZE", 80),
+        stats_interval_sec=_get_int("STATS_INTERVAL_SEC", 30),
+        oi_concurrency=_get_int("OI_CONCURRENCY", 20),
         telegram_bot_token=_get_str("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=_get_str("TELEGRAM_CHAT_ID", ""),
         log_level=_get_str("LOG_LEVEL", "INFO").upper(),
